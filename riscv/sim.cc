@@ -35,6 +35,7 @@ const size_t sim_t::INTERLEAVE;
 
 extern device_factory_t* clint_factory;
 extern device_factory_t* plic_factory;
+extern device_factory_t* aplic_factory;
 extern device_factory_t* ns16550_factory;
 extern device_factory_t* imsic_mmio_factory;
 
@@ -123,8 +124,9 @@ sim_t::sim_t(const cfg_t *cfg, bool halted,
   std::vector<device_factory_sargs_t> device_factories = {
     {clint_factory, {}}, // clint must be element 0
     {plic_factory, {}}, // plic must be element 1
-    {ns16550_factory, {}},
-    {imsic_mmio_factory, {}}};
+    {imsic_mmio_factory, {}},
+    {aplic_factory, {}},
+    {ns16550_factory, {}}};
   device_factories.insert(device_factories.end(),
                           plugin_device_factories.begin(),
                           plugin_device_factories.end());
@@ -141,9 +143,13 @@ sim_t::sim_t(const cfg_t *cfg, bool halted,
     dtb = strstream.str();
     dts = dtb_to_dts(dtb);
   } else {
+    isa_parser_t isa(cfg->isa, cfg->priv);
     std::string device_nodes;
     for (const device_factory_sargs_t& factory_sargs: device_factories) {
       const device_factory_t* factory = factory_sargs.first;
+      // skip PLIC if SSAIA
+      if (factory == plic_factory && isa.extension_enabled(EXT_SSAIA))
+        continue;
       const std::vector<std::string>& sargs = factory_sargs.second;
       device_nodes.append(factory->generate_dts(this, sargs));
     }
@@ -246,24 +252,6 @@ sim_t::sim_t(const cfg_t *cfg, bool halted,
     cpu_idx++;
   }
 
-  // must be located after procs/harts are set (devices might use sim_t get_* member functions)
-  for (size_t i = 0; i < device_factories.size(); i++) {
-    const device_factory_t* factory = device_factories[i].first;
-    const std::vector<std::string>& sargs = device_factories[i].second;
-    reg_t device_base = 0;
-    abstract_device_t* device = factory->parse_from_fdt(fdt, this, &device_base, sargs);
-    if (device) {
-      assert(device_base);
-      std::shared_ptr<abstract_device_t> dev_ptr(device);
-      add_device(device_base, dev_ptr);
-
-      if (i == 0) // clint_factory
-        clint = std::static_pointer_cast<clint_t>(dev_ptr);
-      else if (i == 1) // plic_factory
-        plic = std::static_pointer_cast<plic_t>(dev_ptr);
-    }
-  }
-
   // parse IMSICs & create MMIO portions
   reg_t imsic_m_addr = 0, imsic_s_addr = 0;
   if (fdt_parse_imsics(fdt, &imsic_m_addr, &imsic_s_addr, "riscv,imsics") == 0) {
@@ -291,6 +279,39 @@ sim_t::sim_t(const cfg_t *cfg, bool halted,
           }
         }
       }
+    }
+  }
+
+  // create aplic
+  reg_t aplic_m_base, aplic_s_base;
+  if (fdt_parse_aplic(fdt, &aplic_m_base, &aplic_s_base, "riscv,aplic") == 0) {
+    if (aplic_m_base) {
+      aplic_m.reset(new aplic_t(procs, nullptr));
+      bus.add_device(aplic_m_base, aplic_m.get());
+    }
+    if (aplic_s_base) {
+      aplic_s.reset(new aplic_t(procs, aplic_m.get()));
+      bus.add_device(aplic_s_base, aplic_s.get());
+      if (aplic_m)
+        aplic_m->set_child(aplic_s.get());
+    }
+  }
+
+  // must be located after procs/harts are set (devices might use sim_t get_* member functions)
+  for (size_t i = 0; i < device_factories.size(); i++) {
+    const device_factory_t* factory = device_factories[i].first;
+    const std::vector<std::string>& sargs = device_factories[i].second;
+    reg_t device_base = 0;
+    abstract_device_t* device = factory->parse_from_fdt(fdt, this, &device_base, sargs);
+    if (device) {
+      assert(device_base);
+      std::shared_ptr<abstract_device_t> dev_ptr(device);
+      add_device(device_base, dev_ptr);
+
+      if (i == 0) // clint_factory
+        clint = std::static_pointer_cast<clint_t>(dev_ptr);
+      else if (i == 1) // plic_factory
+        plic = std::static_pointer_cast<plic_t>(dev_ptr);
     }
   }
 }

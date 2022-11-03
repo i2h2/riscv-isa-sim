@@ -136,35 +136,37 @@ std::string imsic_mmio_generate_dts(const sim_t* sim, const std::vector<std::str
   isa_parser_t isa(cfg.isa, cfg.priv);
   std::stringstream s;
   if (isa.extension_enabled(EXT_SMAIA)) {
-    s << std::hex << "  imsics@" << IMSIC_M_BASE << " {\n"
-         "          riscv,ipi-id = <0x01>;\n"
-         "          riscv,num-ids = <0xff>;\n"
-         "          reg = <0x00 0x" << IMSIC_M_BASE << " 0x00 0x" << sim->nprocs() * IMSIC_MMIO_PAGE_SIZE << ">;\n"
-         "          interrupts-extended = <" << std::dec;
+    s << std::hex
+      << "    IMSIC_M: imsics@" << IMSIC_M_BASE << " {\n"
+         "      riscv,ipi-id = <0x01>;\n"
+         "      riscv,num-ids = <0xff>;\n"
+         "      reg = <0x00 0x" << IMSIC_M_BASE << " 0x00 0x" << sim->nprocs() * IMSIC_MMIO_PAGE_SIZE << ">;\n"
+         "      interrupts-extended = <" << std::dec;
     for (size_t i = 0; i < sim->nprocs(); i++)
       s << "&CPU" << i << "_intc 0xb ";
     s << std::hex << ">;\n"
-         "          msi-controller;\n"
-         "          interrupt-controller;\n"
-         "          #interrupt-cells = <0x00>;\n"
-         "          compatible = \"riscv,imsics\";\n"
-         "  };\n";
+         "      msi-controller;\n"
+         "      interrupt-controller;\n"
+         "      #interrupt-cells = <0x00>;\n"
+         "      compatible = \"riscv,imsics\";\n"
+         "    };\n";
   }
   if (isa.extension_enabled(EXT_SSAIA)) {
-    s << std::hex << "  imsics@" << IMSIC_S_BASE << " {\n"
-         "          riscv,ipi-id = <0x01>;\n"
-         "          riscv,num-ids = <0xff>;\n"
-         "          riscv,guest-index-bits = <0x6>;\n"
-         "          reg = <0x00 0x" << IMSIC_S_BASE << " 0x00 0x" << sim->nprocs() * IMSIC_MMIO_PAGE_SIZE * 64 << ">;\n"
-         "          interrupts-extended = <" << std::dec;
+    s << std::hex
+      << "    IMSIC_S: imsics@" << IMSIC_S_BASE << " {\n"
+         "      riscv,ipi-id = <0x01>;\n"
+         "      riscv,num-ids = <0xff>;\n"
+         "      riscv,guest-index-bits = <0x6>;\n"
+         "      reg = <0x00 0x" << IMSIC_S_BASE << " 0x00 0x" << sim->nprocs() * IMSIC_MMIO_PAGE_SIZE * 64 << ">;\n"
+         "      interrupts-extended = <" << std::dec;
     for (size_t i = 0; i < sim->nprocs(); i++)
       s << "&CPU" << i << "_intc 0x9 ";
     s << std::hex << ">;\n"
-         "          msi-controller;\n"
-         "          interrupt-controller;\n"
-         "          #interrupt-cells = <0x00>;\n"
-         "          compatible = \"riscv,imsics\";\n"
-         "  };\n";
+         "      msi-controller;\n"
+         "      interrupt-controller;\n"
+         "      #interrupt-cells = <0x00>;\n"
+         "      compatible = \"riscv,imsics\";\n"
+         "    };\n";
   }
   return s.str();
 }
