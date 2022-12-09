@@ -277,6 +277,7 @@ void sim_t::interactive()
   funcs["insn"] = &sim_t::interactive_insn;
   funcs["priv"] = &sim_t::interactive_priv;
   funcs["mem"] = &sim_t::interactive_mem;
+  funcs["mmio"] = &sim_t::interactive_mmio;
   funcs["str"] = &sim_t::interactive_str;
   funcs["mtime"] = &sim_t::interactive_mtime;
   funcs["mtimecmp"] = &sim_t::interactive_mtimecmp;
@@ -371,6 +372,7 @@ void sim_t::interactive_help(const std::string& cmd, const std::vector<std::stri
     "insn <core>                     # Show current instruction corresponding to PC in <core>\n"
     "priv <core>                     # Show current privilege level in <core>\n"
     "mem [core] <hex addr>           # Show contents of virtual memory <hex addr> in [core] (physical memory <hex addr> if omitted)\n"
+    "mmio <hex addr> <len> [va]      # Display MMIO register at <hex addr> of size <len> or set it to [val]\n"
     "str [core] <hex addr>           # Show NUL-terminated C string at virtual address <hex addr> in [core] (physical address <hex addr> if omitted)\n"
     "dump                            # Dump physical memory to binary files\n"
     "mtime                           # Show mtime\n"
@@ -533,6 +535,16 @@ reg_t sim_t::get_reg(const std::vector<std::string>& args)
       if (ret)
         return ret.value();
       throw trap_interactive();
+    }
+  } else if (r == NXPR && args.size() == 3) {
+    char *ptr;
+    r = strtoul(args[1].c_str(), &ptr, 10);
+    reg_t val = strtoul(args[2].c_str(), NULL, 0);
+    if (*ptr) {
+      #define DECLARE_CSR(name, number) if (args[1] == #name) {p->put_csr(number, val); return p->get_csr(number);}
+      #include "encoding.h"              // generates if's for all csrs
+      r = NXPR;                          // else case (csr name not found)
+      #undef DECLARE_CSR
     }
   }
 
@@ -761,6 +773,35 @@ void sim_t::interactive_mem(const std::string& cmd, const std::vector<std::strin
   } catch(trap_t& t) {
     out << "Memory access failed with exception: " << t.name() << std::endl;
   }
+}
+
+void sim_t::interactive_mmio(const std::string& cmd, const std::vector<std::string>& args)
+{
+  int max_xlen = procs[0]->get_isa().get_max_xlen();
+
+  if (args.size() != 2 && args.size() != 3)
+    throw trap_interactive();
+
+  bool write = args.size() > 2;
+  reg_t addr = strtol(args[0].c_str(), NULL, 16);
+  reg_t len = strtol(args[1].c_str(), NULL, 0);
+  reg_t data = !write ? 0 : strtol(args[2].c_str(), NULL, 0);
+  std::ostream out(sout_.rdbuf());
+  bool rc;
+  if (write) {
+    rc = mmio_store(addr, len, (uint8_t*)&data);
+    if (!rc) {
+      out << std::hex << "Fail to write to address 0x" << addr << std::endl;
+      return;
+    }
+  }
+  rc = mmio_load(addr, len, (uint8_t*)&data);
+  if (!rc) {
+    out << std::hex << "Fail to read from address 0x" << addr << std::endl;
+    return;
+  }
+  out << std::hex << "0x" << std::setfill('0') << std::setw(max_xlen/4)
+      << zext(data, max_xlen) << std::endl;
 }
 
 void sim_t::interactive_str(const std::string& cmd, const std::vector<std::string>& args)
