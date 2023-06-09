@@ -131,6 +131,7 @@ private:
   void interactive_pc(const std::string& cmd, const std::vector<std::string>& args);
   void interactive_insn(const std::string& cmd, const std::vector<std::string>& args);
   void interactive_priv(const std::string& cmd, const std::vector<std::string>& args);
+  void interactive_virt(const std::string& cmd, const std::vector<std::string>& args);
   void interactive_mem(const std::string& cmd, const std::vector<std::string>& args);
   void interactive_mmio(const std::string& cmd, const std::vector<std::string>& args);
   void interactive_str(const std::string& cmd, const std::vector<std::string>& args);
