@@ -23,6 +23,7 @@
 #include <vector>
 #include <algorithm>
 #include <math.h>
+#include <cxxabi.h>
 
 #ifdef __GNUC__
 # pragma GCC diagnostic ignored "-Wunused-parameter"
@@ -284,6 +285,7 @@ void sim_t::interactive()
   funcs["until"] = &sim_t::interactive_until_silent;
   funcs["untiln"] = &sim_t::interactive_until_noisy;
   funcs["while"] = &sim_t::interactive_until_silent;
+  funcs["dev"] = &sim_t::interactive_dev;
   funcs["dump"] = &sim_t::interactive_dumpmems;
   funcs["quit"] = &sim_t::interactive_quit;
   funcs["q"] = funcs["quit"];
@@ -391,6 +393,7 @@ void sim_t::interactive_help(const std::string& cmd, const std::vector<std::stri
     "run [count]                     # Resume noisy execution (until CTRL+C, or [count] insns)\n"
     "r [count]                         Alias for run\n"
     "rs [count]                      # Resume silent execution (until CTRL+C, or [count] insns)\n"
+    "dev                             # List all devices\n"
     "quit                            # End the simulation\n"
     "q                                 Alias for quit\n"
     "help                            # This screen!\n"
@@ -925,4 +928,19 @@ void sim_t::interactive_mtimecmp(const std::string& cmd, const std::vector<std::
   std::ostream out(sout_.rdbuf());
   out << std::hex << std::setfill('0') << "0x" << std::setw(16)
       << clint->get_mtimecmp(p->get_id()) << std::endl;
+}
+
+void sim_t::interactive_dev(const std::string& cmd, const std::vector<std::string>& args)
+{
+  std::cout << "Memory layout:" << std::endl;
+  for (auto &x : mems) {
+    std::cout << std::hex << "  0x" << std::setfill('0') << std::setw(8) << x.first << " size: 0x" << x.second->size() << std::endl;
+  }
+
+  std::cout << "Bus layout:" << std::endl;
+  for (auto &x : bus.get_devices()) {
+    auto base = x.first;
+    auto dev = x.second;
+    std::cout << std::hex << "  0x" << std::setfill('0') << std::setw(8) << base << " " << abi::__cxa_demangle(typeid(*dev).name(), nullptr, nullptr, nullptr) << std::endl;
+  }
 }
