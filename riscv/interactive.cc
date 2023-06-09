@@ -277,6 +277,7 @@ void sim_t::interactive()
   funcs["pc"] = &sim_t::interactive_pc;
   funcs["insn"] = &sim_t::interactive_insn;
   funcs["priv"] = &sim_t::interactive_priv;
+  funcs["virt"] = &sim_t::interactive_virt;
   funcs["mem"] = &sim_t::interactive_mem;
   funcs["mmio"] = &sim_t::interactive_mmio;
   funcs["str"] = &sim_t::interactive_str;
@@ -372,7 +373,8 @@ void sim_t::interactive_help(const std::string& cmd, const std::vector<std::stri
     "vreg <core> [reg]               # Display vector [reg] (all if omitted) in <core>\n"
     "pc <core>                       # Show current PC in <core>\n"
     "insn <core>                     # Show current instruction corresponding to PC in <core>\n"
-    "priv <core>                     # Show current privilege level in <core>\n"
+    "priv <core> [priv]              # Show/set current privilege level in <core>\n"
+    "virt <core> [virt]              # Show/set current virt mode in <core>\n"
     "mem [core] <hex addr>           # Show contents of virtual memory <hex addr> in [core] (physical memory <hex addr> if omitted)\n"
     "mmio <hex addr> <len> [va]      # Display MMIO register at <hex addr> of size <len> or set it to [val]\n"
     "str [core] <hex addr>           # Show NUL-terminated C string at virtual address <hex addr> in [core] (physical address <hex addr> if omitted)\n"
@@ -485,12 +487,40 @@ void sim_t::interactive_insn(const std::string& cmd, const std::vector<std::stri
 
 void sim_t::interactive_priv(const std::string& cmd, const std::vector<std::string>& args)
 {
-  if (args.size() != 1)
+  auto argc = args.size();
+  if (argc != 1 && argc != 2)
     throw trap_interactive();
 
   processor_t *p = get_core(args[0]);
-  std::ostream out(sout_.rdbuf());
-  out << p->get_privilege_string() << std::endl;
+
+  if (argc == 1) {
+    std::ostream out(sout_.rdbuf());
+    out << p->get_privilege_string() << std::endl;
+  } else {
+    reg_t prv = atoi(args[1].c_str());
+    if (prv <= PRV_M) {
+      p->get_mmu()->flush_tlb();
+      p->get_state()->prv = p->legalize_privilege(prv);
+    }
+  }
+}
+
+void sim_t::interactive_virt(const std::string& cmd, const std::vector<std::string>& args)
+{
+  auto argc = args.size();
+  if (argc != 1 && argc != 2)
+    throw trap_interactive();
+
+  processor_t *p = get_core(args[0]);
+
+  if (argc == 1) {
+    std::ostream out(sout_.rdbuf());
+    out << p->get_state()->v << std::endl;
+  } else {
+    bool virt = atoi(args[1].c_str());
+    p->get_mmu()->flush_tlb();
+    p->get_state()->v = virt;
+  }
 }
 
 static std::optional<reg_t> read_write_csr(std::unordered_map<reg_t, csr_t_p> &csrmap, const std::string &csrname, bool write, bool poke, bool verify_perm, const reg_t val) {
