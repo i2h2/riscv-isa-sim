@@ -360,7 +360,8 @@ void sim_t::interactive_help(const std::string& cmd, const std::vector<std::stri
   std::ostream out(sout_.rdbuf());
   out <<
     "Interactive commands:\n"
-    "reg <core> [reg]                # Display [reg] (all if omitted) in <core>\n"
+    "reg <core> [reg] [val]          # Display [reg] (all if omitted) in <core> or set [reg] to [val]\n"
+    "reg <core> <csr> [val] [flags]  # Display <csr> or set <csr> to [val]. Poke if [flags] == 1, write with CSR privilege verification if [flags] == 2\n"
     "freg <core> <reg>               # Display float <reg> in <core> as hex\n"
     "fregh <core> <reg>              # Display half precision <reg> in <core>\n"
     "fregs <core> <reg>              # Display single precision <reg> in <core>\n"
@@ -487,27 +488,60 @@ void sim_t::interactive_priv(const std::string& cmd, const std::vector<std::stri
   out << p->get_privilege_string() << std::endl;
 }
 
+static std::optional<reg_t> read_write_csr(std::unordered_map<reg_t, csr_t_p> &csrmap, const std::string &csrname, bool write, bool poke, bool verify_perm, const reg_t val) {
+  #define DECLARE_CSR(csr_name, number) if (csrname == #csr_name && csrmap.count(number)) {\
+                                          auto csr = csrmap[number];\
+                                          if (verify_perm) { csr->verify_permissions(0, true); }\
+                                          if (poke || write) { csr->write(val); }\
+                                          return csr->read();\
+                                        }
+  #include "encoding.h"              // generates if's for all csrs
+  #undef DECLARE_CSR
+  // CSR name not found
+  return std::nullopt;
+}
+
 reg_t sim_t::get_reg(const std::vector<std::string>& args)
 {
-  if (args.size() != 2)
+  if (args.size() < 2 || args.size() > 4)
     throw trap_interactive();
 
   processor_t *p = get_core(args[0]);
 
   unsigned long r = std::find(xpr_name, xpr_name + NXPR, args[1]) - xpr_name;
-  if (r == NXPR) {
+  if (r == NXPR && args.size() == 2) {
     char *ptr;
     r = strtoul(args[1].c_str(), &ptr, 10);
     if (*ptr) {
-      #define DECLARE_CSR(name, number) if (args[1] == #name) return p->get_csr(number);
-      #include "encoding.h"              // generates if's for all csrs
-      r = NXPR;                          // else case (csr name not found)
-      #undef DECLARE_CSR
+      auto &csrmap = p->get_state()->csrmap;
+      auto ret = read_write_csr(csrmap, args[1], false, false, false, 0);
+      if (ret)
+        return ret.value();
+      throw trap_interactive();
+    }
+  } else if (r == NXPR && args.size() >= 3) {
+    char *ptr;
+    r = strtoul(args[1].c_str(), &ptr, 10);
+    reg_t val = strtoul(args[2].c_str(), NULL, 0);
+    if (*ptr) {
+      auto &csrmap = p->get_state()->csrmap;
+      auto flags = 0;
+      if (args.size() > 3 && atoi(args[3].c_str())) {
+        flags = atoi(args[3].c_str());
+      }
+      auto ret = read_write_csr(csrmap, args[1], flags == 0 || flags == 2, flags == 1, flags == 2, val);
+      if (ret)
+        return ret.value();
+      throw trap_interactive();
     }
   }
 
   if (r >= NXPR)
     throw trap_interactive();
+
+  // set register if argument specified
+  if (args.size() == 3)
+    p->get_state()->XPR.write(r, strtoul(args[2].c_str(), NULL, 0));
 
   return p->get_state()->XPR[r];
 }
@@ -620,8 +654,17 @@ void sim_t::interactive_reg(const std::string& cmd, const std::vector<std::strin
         out << std::endl;
     }
   } else {
+    reg_t val = 0;
+    try {
+      val = get_reg(args);
+    } catch (trap_interactive &t) {
+      throw;
+    } catch (trap_t &t) {
+      std::cout << "Failed with " << t.name() << "\n";
+      return;
+    }
     out << "0x" << std::setfill('0') << std::setw(max_xlen/4)
-        << zext(get_reg(args), max_xlen) << std::endl;
+        << zext(val, max_xlen) << std::endl;
   }
 }
 
@@ -710,9 +753,14 @@ void sim_t::interactive_mem(const std::string& cmd, const std::vector<std::strin
   int max_xlen = procs[0]->get_isa().get_max_xlen();
 
   std::ostream out(sout_.rdbuf());
-  reg_t mem_val = get_mem(args); // ensure this is outside of ostream to not pollute output on non-interactive trap
-  out << std::hex << "0x" << std::setfill('0') << std::setw(max_xlen/4)
-      << zext(mem_val, max_xlen) << std::endl;
+  try {
+    auto val = get_mem(args);
+    out << std::hex << "0x" << std::setfill('0') << std::setw(max_xlen/4) << zext(val, max_xlen) << std::endl;
+  } catch(trap_interactive& t) {
+    throw;
+  } catch(trap_t& t) {
+    out << "Memory access failed with exception: " << t.name() << std::endl;
+  }
 }
 
 void sim_t::interactive_str(const std::string& cmd, const std::vector<std::string>& args)
