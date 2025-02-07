@@ -411,6 +411,7 @@ class generic_int_accessor_t {
   void ie_write(const reg_t val) noexcept;
   reg_t vip_read() const noexcept;
   void vip_write(const reg_t val) noexcept;
+  reg_t read_shadow() const noexcept { return shadow_val; }
  private:
   processor_t* const proc;
   state_t* const state;
@@ -424,7 +425,7 @@ class generic_int_accessor_t {
   reg_t deleg_mask() const;
   reg_t vien_mask() const;
   // AIA extends bits [63:13] in mvip/hvip and sie/vsie that are independent of bits in mip and mie
-  reg_t aia_val;
+  reg_t shadow_val;
 };
 
 typedef std::shared_ptr<generic_int_accessor_t> generic_int_accessor_t_p;
@@ -446,11 +447,13 @@ class vip_proxy_csr_t: public csr_t {
  public:
   vip_proxy_csr_t(processor_t* const proc, const reg_t addr, generic_int_accessor_t_p accr);
   virtual reg_t read() const noexcept override;
+  reg_t read_shadow() const noexcept;
  protected:
   virtual bool unlogged_write(const reg_t val) noexcept override;
  private:
   generic_int_accessor_t_p accr;
 };
+typedef std::shared_ptr<vip_proxy_csr_t> vip_proxy_csr_t_p;
 
 // For all CSRs that are simply (masked & shifted) views into mie
 class mie_proxy_csr_t: public csr_t {

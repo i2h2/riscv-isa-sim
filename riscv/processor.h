@@ -131,7 +131,7 @@ struct state_t
   csr_t_p htval;
   csr_t_p htinst;
   csr_t_p hgatp;
-  csr_t_p hvip;
+  vip_proxy_csr_t_p hvip;
   csr_t_p hip;
   csr_t_p hie;
   csr_t_p hgeie;

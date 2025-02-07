@@ -837,7 +837,7 @@ generic_int_accessor_t::generic_int_accessor_t(processor_t* const proc,
   mask_hideleg(mask_mode == HIDELEG),
   shiftamt(shiftamt),
   aia_mask(aia_mask),
-  aia_val(0) {
+  shadow_val(0) {
 }
 
 // shiftamt should only be applied to non-AIA bits [12:0]
@@ -860,21 +860,21 @@ void generic_int_accessor_t::ip_write(const reg_t val) noexcept {
     if (mask_mideleg)
       state->mvip->unlogged_write(vien_mask() & val);
     else
-      state->hvip->unlogged_write(vien_mask() & val);
+      static_cast<csr_t_p>(state->hvip)->unlogged_write(vien_mask() & val);
   }
 }
 
 reg_t generic_int_accessor_t::ie_read() const noexcept {
   const reg_t v = state->mie->read();
   const reg_t delegated = v & deleg_mask();
-  return (aia_val & vien_mask()) | ((delegated & read_mask) >> shiftamt) | (delegated & aia_mask);
+  return (shadow_val & vien_mask()) | ((delegated & read_mask) >> shiftamt) | (delegated & aia_mask);
 }
 
 void generic_int_accessor_t::ie_write(const reg_t val) noexcept {
   const reg_t delegated_mask = deleg_mask() & (ie_write_mask | aia_mask);
   state->mie->write_with_mask(delegated_mask, ((val << shiftamt) & ie_write_mask) | (val & aia_mask));
   // bits in vien_mask do not alias into mie
-  aia_val = vien_mask() & val;
+  shadow_val = vien_mask() & val;
 }
 
 reg_t generic_int_accessor_t::deleg_mask() const {
@@ -896,14 +896,18 @@ reg_t generic_int_accessor_t::vien_mask() const {
 }
 
 reg_t generic_int_accessor_t::vip_read() const noexcept {
-  const reg_t delegated_mask = deleg_mask() & (read_mask | aia_mask);
-  return (state->mip->read() & delegated_mask) | (aia_val & vien_mask());
+  // hip.VSSIP is an alias of MIP.VSSIP
+  return (mask_hideleg ? (state->mip->read() & MIP_VSSIP) : 0) | shadow_val;
 }
 
 void generic_int_accessor_t::vip_write(const reg_t val) noexcept {
-  // hvip uses aliases mip for bits [12:0] and aia_val for higher bits
-  // mvip has no aliases from mip (for now)
-  aia_val = vien_mask() & val;
+  // mvip/hvip stores [63:13] locally
+  // mvip.SSIP and SEIP unsupported and always read 0
+  // hvip has its own copy of VSEIP and VSTIP that are or'ed into mip
+  shadow_val = val & (MIDELEG_AIA_MASK | (mask_hideleg ? (MIP_VSEIP | MIP_VSTIP) : 0));
+  // hvip.VSSIP is an alias of mip.VSSIP
+  if (mask_hideleg)
+    state->mip->write_with_mask(MIP_VSSIP, val);
 }
 
 // implement class mip_proxy_csr_t
@@ -935,6 +939,10 @@ vip_proxy_csr_t::vip_proxy_csr_t(processor_t* const proc, const reg_t addr, gene
 
 reg_t vip_proxy_csr_t::read() const noexcept {
   return accr->vip_read();
+}
+
+reg_t vip_proxy_csr_t::read_shadow() const noexcept {
+  return accr->read_shadow();
 }
 
 bool vip_proxy_csr_t::unlogged_write(const reg_t val) noexcept {
