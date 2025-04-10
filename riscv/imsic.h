@@ -43,7 +43,7 @@ class bus_t;
 class imsic_file_t {
  friend imsic_mmio_t;
  public:
-  imsic_file_t(processor_t* const proc, reg_t mip_mask, bool v = false, reg_t vgein = 0);
+  imsic_file_t(processor_t* const proc, reg_t mip_mask, size_t num_regs, bool v = false, reg_t vgein = 0);
   reg_t topei();
   void claimei(reg_t intr);
   void pendei(reg_t intr);

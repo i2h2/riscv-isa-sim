@@ -20,15 +20,21 @@ class imsic_csr_t : public masked_csr_t {
   imsic_file_t &imsic_file;
 };
 
-imsic_file_t::imsic_file_t(processor_t* const proc, reg_t mip_mask, bool v, reg_t vgein) : proc(proc), state(proc->get_state()), mip_mask(mip_mask), v(v), vgein(vgein) {
+imsic_file_t::imsic_file_t(processor_t* const proc, reg_t mip_mask, size_t num_regs, bool v, reg_t vgein) : proc(proc), state(proc->get_state()), mip_mask(mip_mask), v(v), vgein(vgein) {
   auto xlen = proc->get_isa().get_max_xlen();
   csrmap[IMSIC_EIDELIVERY] = eidelivery = std::make_shared<imsic_csr_t>(proc, IMSIC_EIDELIVERY, this, 1, 0);
   csrmap[IMSIC_EITHRESHOLD] = eithreshold = std::make_shared<imsic_csr_t>(proc, IMSIC_EITHRESHOLD, this);
   for (size_t i = 0; i < IMSIC_NUM_EI_REGS; i++) {
-    // 1st bits of eip/eie are hard-wired to 0
-    const reg_t mask = i == 0 ? ~1ull : -1;
-    eip.emplace_back(std::make_shared<imsic_csr_t>(proc, IMSIC_EIP(i * 2), this, mask));
-    eie.emplace_back(std::make_shared<imsic_csr_t>(proc, IMSIC_EIE(i * 2), this, mask));
+    if (i < num_regs) {
+      // 1st bits of eip/eie are hard-wired to 0
+      const reg_t mask = i == 0 ? ~1ull : -1;
+      eip.emplace_back(std::make_shared<imsic_csr_t>(proc, IMSIC_EIP(i * 2), this, mask));
+      eie.emplace_back(std::make_shared<imsic_csr_t>(proc, IMSIC_EIE(i * 2), this, mask));
+    } else {
+      // make a const 0 register if index >= number of IMSIC files
+      eip.emplace_back(std::make_shared<const_csr_t>(proc, IMSIC_EIP(i * 2), 0));
+      eie.emplace_back(std::make_shared<const_csr_t>(proc, IMSIC_EIP(i * 2), 0));
+    }
     if (xlen == 32) {
       csrmap[IMSIC_EIP(i * 2)] = std::make_shared<rv32_low_csr_t>(proc, IMSIC_EIP(i * 2), eip[i]);
       csrmap[IMSIC_EIP(i * 2 + 1)] = std::make_shared<rv32_high_csr_t>(proc, IMSIC_EIP(i * 2 + 1), eip[i]);
@@ -114,12 +120,12 @@ bool imsic_mmio_t::store(reg_t addr, size_t len, const uint8_t* bytes) {
 
 imsic_t::imsic_t(processor_t *proc, unsigned geilen) {
   if (proc->extension_enabled_const(EXT_SMAIA))
-    m = std::make_shared<imsic_file_t>(proc, MIP_MEIP);
+    m = std::make_shared<imsic_file_t>(proc, MIP_MEIP, IMSIC_M_FILE_REGS);
   if (proc->extension_enabled_const(EXT_SSAIA)) {
-    s = std::make_shared<imsic_file_t>(proc, MIP_SEIP);
+    s = std::make_shared<imsic_file_t>(proc, MIP_SEIP, IMSIC_S_FILE_REGS);
     assert(geilen <= 63);
     for (size_t j = 1; j <= geilen; j++) {
-      vs[j] = std::make_shared<imsic_file_t>(proc, MIP_VSEIP, true, j);
+      vs[j] = std::make_shared<imsic_file_t>(proc, MIP_VSEIP, IMSIC_VS_FILE_REGS, true, j);
     }
   }
 }
