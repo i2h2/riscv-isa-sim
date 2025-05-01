@@ -20,6 +20,7 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <sys/types.h>
+#include "imsic.h"
 
 volatile bool ctrlc_pressed = false;
 static void handle_signal(int sig)
@@ -35,6 +36,7 @@ const size_t sim_t::INTERLEAVE;
 extern device_factory_t* clint_factory;
 extern device_factory_t* plic_factory;
 extern device_factory_t* ns16550_factory;
+extern device_factory_t* imsic_mmio_factory;
 
 sim_t::sim_t(const cfg_t *cfg, bool halted,
              std::vector<std::pair<reg_t, abstract_mem_t*>> mems,
@@ -103,7 +105,7 @@ sim_t::sim_t(const cfg_t *cfg, bool halted,
     for (size_t i = 0; i < cfg->nprocs(); i++) {
       procs.push_back(new processor_t(cfg->isa, cfg->priv,
                                       cfg, this, cfg->hartids[i], halted,
-                                      log_file.get(), sout_));
+                                      GEILEN, log_file.get(), sout_));
       harts[cfg->hartids[i]] = procs[i];
     }
     return;
@@ -112,6 +114,7 @@ sim_t::sim_t(const cfg_t *cfg, bool halted,
   // Only make a CLINT (Core-Local INTerrupt controller) and PLIC (Platform-
   // Level-Interrupt-Controller) if they are specified in the device tree
   // configuration.
+
   //
   // This isn't *quite* as general as we could get (because you might have one
   // that's not bus-accessible), but it should handle the normal use cases. In
@@ -120,7 +123,8 @@ sim_t::sim_t(const cfg_t *cfg, bool halted,
   std::vector<device_factory_sargs_t> device_factories = {
     {clint_factory, {}}, // clint must be element 0
     {plic_factory, {}}, // plic must be element 1
-    {ns16550_factory, {}}};
+    {ns16550_factory, {}},
+    {imsic_mmio_factory, {}}};
   device_factories.insert(device_factories.end(),
                           plugin_device_factories.begin(),
                           plugin_device_factories.end());
@@ -198,7 +202,7 @@ sim_t::sim_t(const cfg_t *cfg, bool halted,
 
     procs.push_back(new processor_t(isa_str, cfg->priv,
                                     cfg, this, hartid, halted,
-                                    log_file.get(), sout_));
+                                    GEILEN, log_file.get(), sout_));
     harts[hartid] = procs[cpu_idx];
 
     // handle pmp
@@ -257,6 +261,36 @@ sim_t::sim_t(const cfg_t *cfg, bool halted,
         clint = std::static_pointer_cast<clint_t>(dev_ptr);
       else if (i == 1) // plic_factory
         plic = std::static_pointer_cast<plic_t>(dev_ptr);
+    }
+  }
+
+  // parse IMSICs & create MMIO portions
+  reg_t imsic_m_addr = 0, imsic_s_addr = 0;
+  if (fdt_parse_imsics(fdt, &imsic_m_addr, &imsic_s_addr, "riscv,imsics") == 0) {
+    for (size_t id = 0; id < cfg->nprocs(); id++) {
+      auto proc = procs[id];
+      if (proc->extension_enabled_const(EXT_SMAIA) && imsic_m_addr) {
+        reg_t mmio_base = IMSIC_M_BASE + proc->get_id() * IMSIC_MMIO_PAGE_SIZE;
+        auto imsic = new imsic_mmio_t(proc->imsic->m);
+        bus.add_device(mmio_base, imsic);
+        imsics.push_back(imsic);
+      }
+      if (proc->extension_enabled_const(EXT_SSAIA) && imsic_s_addr) {
+        // There are 1 S-mode and up to 63 VS-mode pages per core as defined by riscv,guest-index-bits in DTS
+        assert(GEILEN <= 63);
+        reg_t mmio_base = IMSIC_S_BASE + proc->get_id() * IMSIC_MMIO_PAGE_SIZE * 64;
+        auto imsic = new imsic_mmio_t(proc->imsic->s);
+        bus.add_device(mmio_base, imsic);
+        imsics.push_back(imsic);
+        // S+VS files are laid out as S, G1, G2, G3,...
+        if (proc->extension_enabled('H')) {
+          for (size_t j = 1; j <= GEILEN; j++) {
+            auto imsic = new imsic_mmio_t(proc->imsic->vs[j]);
+            bus.add_device(mmio_base + IMSIC_MMIO_PAGE_SIZE * j, imsic);
+            imsics.push_back(imsic);
+          }
+        }
+      }
     }
   }
 }

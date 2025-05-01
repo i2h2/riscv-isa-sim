@@ -73,6 +73,7 @@ private:
   std::vector<std::pair<reg_t, abstract_mem_t*>> mems;
   std::vector<processor_t*> procs;
   std::map<size_t, processor_t*> harts;
+  std::vector<imsic_mmio_t*> imsics;
   std::pair<reg_t, reg_t> initrd_range;
   std::string dts;
   std::string dtb;

@@ -33,13 +33,13 @@
 processor_t::processor_t(const char* isa_str, const char* priv_str,
                          const cfg_t *cfg,
                          simif_t* sim, uint32_t id, bool halt_on_reset,
-                         FILE* log_file, std::ostream& sout_)
+                         unsigned geilen, FILE* log_file, std::ostream& sout_)
 : debug(false), halt_request(HR_NONE), isa(isa_str, priv_str), cfg(cfg), sim(sim), id(id), xlen(0),
   histogram_enabled(false), log_commits_enabled(false),
   log_file(log_file), sout_(sout_.rdbuf()), halt_on_reset(halt_on_reset),
   in_wfi(false), check_triggers_icount(false),
   impl_table(256, false), extension_enable_table(isa.get_extension_table()),
-  last_pc(1), executions(1), TM(cfg->trigger_count)
+  last_pc(1), executions(1), TM(cfg->trigger_count), geilen(geilen)
 {
   VU.p = this;
   TM.proc = this;
@@ -78,6 +78,10 @@ processor_t::processor_t(const char* isa_str, const char* priv_str,
 
   set_impl(IMPL_MMU_ASID, true);
   set_impl(IMPL_MMU_VMID, true);
+
+  // construct IMSIC files
+  if (extension_enabled_const(EXT_SMAIA) || extension_enabled_const(EXT_SSAIA))
+    imsic = std::make_shared<imsic_t>(this, isa.extension_enabled('H') ? geilen : 0);
 
   reset();
 }
@@ -243,8 +247,9 @@ void processor_t::set_mmu_capability(int cap)
 
 void processor_t::take_interrupt(reg_t pending_interrupts)
 {
+  const reg_t vti = pending_vti();
   // Do nothing if no pending interrupts
-  if (!pending_interrupts) {
+  if (!pending_interrupts && !vti) {
     return;
   }
 
@@ -254,23 +259,42 @@ void processor_t::take_interrupt(reg_t pending_interrupts)
   // M-ints have higher priority over HS-ints and VS-ints
   const reg_t mie = get_field(state.mstatus->read(), MSTATUS_MIE);
   const reg_t m_enabled = state.prv < PRV_M || (state.prv == PRV_M && mie);
-  reg_t enabled_interrupts = pending_interrupts & ~state.mideleg->read() & -m_enabled;
+  const bool smaia = extension_enabled_const(EXT_SMAIA);
+  const bool ssaia = extension_enabled_const(EXT_SSAIA);
+  // Virtual interrupt in mvien and hvien cannot be taken in M-mode
+  reg_t enabled_interrupts = pending_interrupts & ~state.mideleg->read() & -m_enabled & (smaia ? ~state.mvien->read() : ~reg_t(0)) & (ssaia ? ~state.hvien->read() : ~reg_t(0));
+  reg_t topi = 0;
+  if (smaia)
+    topi = get_field(state.mtopi->read(), TOPI_IID);
   if (enabled_interrupts == 0) {
     // HS-ints have higher priority over VS-ints
-    const reg_t deleg_to_hs = state.mideleg->read() & ~state.hideleg->read();
+    // not delegated to VS and not in hvien can trap to the current mode
+    const reg_t deleg_to_hs = (state.mideleg->read() | (ssaia ? state.mvien->read() : 0)) & ~state.hideleg->read() & ~(ssaia ? state.hvien->read() : 0);
     const reg_t sie = get_field(state.sstatus->read(), MSTATUS_SIE);
     const reg_t hs_enabled = state.v || state.prv < PRV_S || (state.prv == PRV_S && sie);
     enabled_interrupts = pending_interrupts & deleg_to_hs & -hs_enabled;
+    if (ssaia)
+      topi = get_field(state.stopi->read(), TOPI_IID);
     if (state.v && enabled_interrupts == 0) {
       // VS-ints have least priority and can only be taken with virt enabled
-      const reg_t deleg_to_vs = state.hideleg->read();
+      const reg_t deleg_to_vs = state.hideleg->read() | (ssaia ? state.hvien->read() | vti : 0);
       const reg_t vs_enabled = state.prv < PRV_S || (state.prv == PRV_S && sie);
-      enabled_interrupts = pending_interrupts & deleg_to_vs & -vs_enabled;
+      enabled_interrupts = ((pending_interrupts & deleg_to_vs) | vti) & -vs_enabled;
+      // vstopi signals S-mode number instead VS-mode for legacy interrupts below SEIP - bump up 1
+      if (ssaia) {
+        topi = get_field(state.vstopi->read(), TOPI_IID);
+        // VTI IID is not shifted down
+        if (topi <= IRQ_S_EXT && (reg_t(1) << topi) != vti)
+          topi++;
+      }
     }
   }
 
   const bool nmie = !(state.mnstatus && !get_field(state.mnstatus->read(), MNSTATUS_NMIE));
   if (!state.debug_mode && nmie && enabled_interrupts) {
+    if (topi)
+      throw trap_t(((reg_t)1 << (isa.get_max_xlen() - 1)) | topi);
+
     // nonstandard interrupts have highest priority
     if (enabled_interrupts >> (IRQ_LCOF + 1))
       enabled_interrupts = enabled_interrupts >> (IRQ_LCOF + 1) << (IRQ_LCOF + 1);
@@ -403,7 +427,9 @@ void processor_t::take_trap(trap_t& t, reg_t epc)
   bool supv_double_trap = false;
   if (interrupt) {
     vsdeleg = (curr_virt && state.prv <= PRV_S) ? state.hideleg->read() : 0;
+    vsdeleg |= extension_enabled_const(EXT_SSAIA) ? (~state.hideleg->read() & state.hvien->read()) : 0;
     hsdeleg = (state.prv <= PRV_S) ? state.mideleg->read() : 0;
+    hsdeleg |= extension_enabled_const(EXT_SSAIA) ? (~state.mideleg->read() & state.mvien->read()) : 0;
     bit &= ~((reg_t)1 << (max_xlen - 1));
   } else {
     vsdeleg = (curr_virt && state.prv <= PRV_S) ? (state.medeleg->read() & state.hedeleg->read()) : 0;
@@ -420,9 +446,12 @@ void processor_t::take_trap(trap_t& t, reg_t epc)
     if (supv_double_trap)
       vsdeleg = hsdeleg = 0;
   }
-  if (state.prv <= PRV_S && bit < max_xlen && ((vsdeleg >> bit) & 1)) {
+  const reg_t vti = pending_vti();
+  const bool is_vti = (reg_t(1) << bit) == vti;
+  if (state.prv <= PRV_S && ((bit < max_xlen && ((vsdeleg >> bit) & 1)) || is_vti)) {
     // Handle the trap in VS-mode
-    const reg_t adjusted_cause = interrupt ? bit - 1 : bit;  // VSSIP -> SSIP, etc
+    // Shift cause only for VS interrupts <= IRQ_VS_EXT and not taking VTI
+    const reg_t adjusted_cause = interrupt && bit <= IRQ_VS_EXT && !is_vti ? bit - 1 : bit;  // VSSIP -> SSIP, etc
     reg_t vector = (state.vstvec->read() & 1) && interrupt ? 4 * adjusted_cause : 0;
     state.pc = (state.vstvec->read() & ~(reg_t)1) + vector;
     state.vscause->write(adjusted_cause | (interrupt ? interrupt_bit : 0));
@@ -567,6 +596,7 @@ void processor_t::disasm(insn_t insn)
     unsigned max_xlen = isa.get_max_xlen();
 
     s << "core " << std::dec << std::setfill(' ') << std::setw(3) << id
+      << " (v=" << state.v << " prv=" << state.prv << ")"
       << std::hex << ": 0x" << std::setfill('0') << std::setw(max_xlen / 4)
       << zext(state.pc, max_xlen) << " (0x" << std::setw(8) << bits << ") "
       << disassembler->disassemble(insn) << std::endl;

@@ -70,6 +70,8 @@ class csr_t {
   // For access to written_value() and unlogged_write():
   friend class rv32_high_csr_t;
   friend class rv32_low_csr_t;
+  friend class read_proxy_csr_t;
+  friend class generic_int_accessor_t;
 };
 
 typedef std::shared_ptr<csr_t> csr_t_p;
@@ -396,17 +398,21 @@ class generic_int_accessor_t {
  public:
   enum mask_mode_t { NONE, MIDELEG, HIDELEG };
 
-  generic_int_accessor_t(state_t* const state,
+  generic_int_accessor_t(processor_t* const proc,
                          const reg_t read_mask,
                          const reg_t ip_write_mask,
                          const reg_t ie_write_mask,
                          const mask_mode_t mask_mode,
-                         const int shiftamt);
+                         const int shiftamt,
+                         const reg_t aia_mask = MIDELEG_AIA_MASK);
   reg_t ip_read() const noexcept;
   void ip_write(const reg_t val) noexcept;
   reg_t ie_read() const noexcept;
   void ie_write(const reg_t val) noexcept;
+  reg_t vip_read() const noexcept;
+  void vip_write(const reg_t val) noexcept;
  private:
+  processor_t* const proc;
   state_t* const state;
   const reg_t read_mask;
   const reg_t ip_write_mask;
@@ -414,7 +420,11 @@ class generic_int_accessor_t {
   const bool mask_mideleg;
   const bool mask_hideleg;
   const int shiftamt;
+  const reg_t aia_mask;
   reg_t deleg_mask() const;
+  reg_t vien_mask() const;
+  // AIA extends bits [63:13] in mvip/hvip and sie/vsie that are independent of bits in mip and mie
+  reg_t aia_val;
 };
 
 typedef std::shared_ptr<generic_int_accessor_t> generic_int_accessor_t_p;
@@ -423,6 +433,18 @@ typedef std::shared_ptr<generic_int_accessor_t> generic_int_accessor_t_p;
 class mip_proxy_csr_t: public csr_t {
  public:
   mip_proxy_csr_t(processor_t* const proc, const reg_t addr, generic_int_accessor_t_p accr);
+  virtual reg_t read() const noexcept override;
+  virtual void verify_permissions(insn_t insn, bool write) const override;
+ protected:
+  virtual bool unlogged_write(const reg_t val) noexcept override;
+ private:
+  generic_int_accessor_t_p accr;
+};
+
+// For all *vip CSRs that are extended by AIA
+class vip_proxy_csr_t: public csr_t {
+ public:
+  vip_proxy_csr_t(processor_t* const proc, const reg_t addr, generic_int_accessor_t_p accr);
   virtual reg_t read() const noexcept override;
  protected:
   virtual bool unlogged_write(const reg_t val) noexcept override;
@@ -435,6 +457,7 @@ class mie_proxy_csr_t: public csr_t {
  public:
   mie_proxy_csr_t(processor_t* const proc, const reg_t addr, generic_int_accessor_t_p accr);
   virtual reg_t read() const noexcept override;
+  virtual void verify_permissions(insn_t insn, bool write) const override;
  protected:
   virtual bool unlogged_write(const reg_t val) noexcept override;
  private:
@@ -573,7 +596,6 @@ class proxy_csr_t: public csr_t {
   virtual reg_t read() const noexcept override;
  protected:
   bool unlogged_write(const reg_t val) noexcept override;
- private:
   csr_t_p delegate;
 };
 
@@ -908,5 +930,4 @@ class scntinhibit_csr_t: public basic_csr_t {
  protected:
   virtual bool unlogged_write(const reg_t val) noexcept override;
 };
-
 #endif

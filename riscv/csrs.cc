@@ -782,7 +782,7 @@ mip_csr_t::mip_csr_t(processor_t* const proc, const reg_t addr):
 }
 
 reg_t mip_csr_t::read() const noexcept {
-  return val | state->hvip->basic_csr_t::read();
+  return val | (MIP_VS_MASK & state->hvip->read_shadow());
 }
 
 void mip_csr_t::backdoor_write_with_mask(const reg_t mask, const reg_t val) noexcept {
@@ -813,49 +813,97 @@ reg_t mie_csr_t::write_mask() const noexcept {
   const reg_t lscof_int = proc->extension_enabled(EXT_SSCOFPMF) ? MIP_LCOFIP : 0;
   const reg_t hypervisor_ints = proc->extension_enabled('H') ? MIP_HS_MASK : 0;
   const reg_t coprocessor_ints = (reg_t)proc->any_custom_extensions() << IRQ_COP;
-  const reg_t delegable_ints = supervisor_ints | coprocessor_ints | lscof_int;
+  const reg_t aia_ints = proc->extension_enabled_const(EXT_SMAIA) ? MIDELEG_AIA_MASK : 0;
+  const reg_t delegable_ints = supervisor_ints | coprocessor_ints | lscof_int | aia_ints;
   const reg_t all_ints = delegable_ints | hypervisor_ints | MIP_MSIP | MIP_MTIP | MIP_MEIP;
   return all_ints;
 }
 
 // implement class generic_int_accessor_t
-generic_int_accessor_t::generic_int_accessor_t(state_t* const state,
+generic_int_accessor_t::generic_int_accessor_t(processor_t* const proc,
                                                const reg_t read_mask,
                                                const reg_t ip_write_mask,
                                                const reg_t ie_write_mask,
                                                const mask_mode_t mask_mode,
-                                               const int shiftamt):
-  state(state),
-  read_mask(read_mask),
-  ip_write_mask(ip_write_mask),
-  ie_write_mask(ie_write_mask),
+                                               const int shiftamt,
+                                               const reg_t aia_mask):
+  proc(proc),
+  state(proc->get_state()),
+  // read/write masks should not include AIA interrupts
+  read_mask(read_mask & ~MIDELEG_AIA_MASK),
+  ip_write_mask(ip_write_mask & ~MIDELEG_AIA_MASK),
+  ie_write_mask(ie_write_mask & ~MIDELEG_AIA_MASK),
   mask_mideleg(mask_mode == MIDELEG),
   mask_hideleg(mask_mode == HIDELEG),
-  shiftamt(shiftamt) {
+  shiftamt(shiftamt),
+  aia_mask(aia_mask),
+  aia_val(0) {
 }
 
+// shiftamt should only be applied to non-AIA bits [12:0]
 reg_t generic_int_accessor_t::ip_read() const noexcept {
-  return (state->mip->read() & deleg_mask() & read_mask) >> shiftamt;
+  const reg_t v = state->mip->read();
+  const reg_t delegated = v & deleg_mask();
+  // for bits [63:13], *ip is an alias of *vip or mip based on *vien
+  reg_t aia_vip_val = 0;
+  const reg_t mask = vien_mask();
+  if (mask)
+    aia_vip_val = (mask_mideleg ? state->mvip->read() : state->hvip->read()) & mask;
+  return aia_vip_val | ((delegated & read_mask) >> shiftamt) | (delegated & aia_mask);
 }
 
 void generic_int_accessor_t::ip_write(const reg_t val) noexcept {
-  const reg_t mask = deleg_mask() & ip_write_mask;
-  state->mip->write_with_mask(mask, val << shiftamt);
+  const reg_t delegated_mask = deleg_mask() & (ip_write_mask | aia_mask);
+  state->mip->write_with_mask(delegated_mask, ((val << shiftamt) & ip_write_mask) | (val & aia_mask));
+  const reg_t mask = vien_mask();
+  if (mask) {
+    if (mask_mideleg)
+      state->mvip->unlogged_write(vien_mask() & val);
+    else
+      state->hvip->unlogged_write(vien_mask() & val);
+  }
 }
 
 reg_t generic_int_accessor_t::ie_read() const noexcept {
-  return (state->mie->read() & deleg_mask() & read_mask) >> shiftamt;
+  const reg_t v = state->mie->read();
+  const reg_t delegated = v & deleg_mask();
+  return (aia_val & vien_mask()) | ((delegated & read_mask) >> shiftamt) | (delegated & aia_mask);
 }
 
 void generic_int_accessor_t::ie_write(const reg_t val) noexcept {
-  const reg_t mask = deleg_mask() & ie_write_mask;
-  state->mie->write_with_mask(mask, val << shiftamt);
+  const reg_t delegated_mask = deleg_mask() & (ie_write_mask | aia_mask);
+  state->mie->write_with_mask(delegated_mask, ((val << shiftamt) & ie_write_mask) | (val & aia_mask));
+  // bits in vien_mask do not alias into mie
+  aia_val = vien_mask() & val;
 }
 
 reg_t generic_int_accessor_t::deleg_mask() const {
-  const reg_t hideleg_mask = mask_hideleg ? state->hideleg->read() : (reg_t)~0;
-  const reg_t mideleg_mask = mask_mideleg ? state->mideleg->read() : (reg_t)~0;
+  const reg_t hideleg_mask = mask_hideleg ? state->hideleg->read() : ~reg_t(0);
+  const reg_t mideleg_mask = mask_mideleg ? state->mideleg->read() : ~reg_t(0);
   return hideleg_mask & mideleg_mask;
+}
+
+reg_t generic_int_accessor_t::vien_mask() const {
+  // vien registers already have the bottom bits [12:0] masked out.
+  // mvien/sip: mideleg[n] = 0 && mvien[n] = 1
+  if (proc->extension_enabled_const(EXT_SMAIA) && mask_mideleg)
+    return ~state->mideleg->read() & state->mvien->read();
+  //  hvien/vsip mideleg[n] = 1 && hideleg[n] = 0 && hvien[n] = 1
+  if (proc->extension_enabled_const(EXT_SSAIA) && mask_hideleg)
+    return ~state->hideleg->read() & state->hvien->read();
+  // 0 if AIA not enabled
+  return 0;
+}
+
+reg_t generic_int_accessor_t::vip_read() const noexcept {
+  const reg_t delegated_mask = deleg_mask() & (read_mask | aia_mask);
+  return (state->mip->read() & delegated_mask) | (aia_val & vien_mask());
+}
+
+void generic_int_accessor_t::vip_write(const reg_t val) noexcept {
+  // hvip uses aliases mip for bits [12:0] and aia_val for higher bits
+  // mvip has no aliases from mip (for now)
+  aia_val = vien_mask() & val;
 }
 
 // implement class mip_proxy_csr_t
@@ -868,8 +916,29 @@ reg_t mip_proxy_csr_t::read() const noexcept {
   return accr->ip_read();
 }
 
+void mip_proxy_csr_t::verify_permissions(insn_t insn, bool write) const {
+  // if VS + AIA + hvictl.VTI, throw virtual inst trap for sip/sie
+  if (proc->extension_enabled_const(EXT_SSAIA) && state->v && get_field(state->hvictl->read(), HVICTL_VTI))
+    throw trap_virtual_instruction(insn.bits());
+}
+
 bool mip_proxy_csr_t::unlogged_write(const reg_t val) noexcept {
   accr->ip_write(val);
+  return false;  // accr has already logged
+}
+
+// implement class vip_proxy_csr_t
+vip_proxy_csr_t::vip_proxy_csr_t(processor_t* const proc, const reg_t addr, generic_int_accessor_t_p accr):
+  csr_t(proc, addr),
+  accr(accr) {
+}
+
+reg_t vip_proxy_csr_t::read() const noexcept {
+  return accr->vip_read();
+}
+
+bool vip_proxy_csr_t::unlogged_write(const reg_t val) noexcept {
+  accr->vip_write(val);
   return false;  // accr has already logged
 }
 
@@ -881,6 +950,12 @@ mie_proxy_csr_t::mie_proxy_csr_t(processor_t* const proc, const reg_t addr, gene
 
 reg_t mie_proxy_csr_t::read() const noexcept {
   return accr->ie_read();
+}
+
+void mie_proxy_csr_t::verify_permissions(insn_t insn, bool write) const {
+  // if VS + AIA + hvictl.VTI, throw virtual inst trap for sip/sie
+  if (proc->extension_enabled_const(EXT_SSAIA) && state->v && get_field(state->hvictl->read(), HVICTL_VTI))
+    throw trap_virtual_instruction(insn.bits());
 }
 
 bool mie_proxy_csr_t::unlogged_write(const reg_t val) noexcept {
@@ -911,7 +986,8 @@ bool mideleg_csr_t::unlogged_write(const reg_t val) noexcept {
   const reg_t supervisor_ints = proc->extension_enabled('S') ? MIP_SSIP | MIP_STIP | MIP_SEIP : 0;
   const reg_t lscof_int = proc->extension_enabled(EXT_SSCOFPMF) ? MIP_LCOFIP : 0;
   const reg_t coprocessor_ints = (reg_t)proc->any_custom_extensions() << IRQ_COP;
-  const reg_t delegable_ints = supervisor_ints | coprocessor_ints | lscof_int;
+  const reg_t aia_ints = proc->extension_enabled_const(EXT_SSAIA) ? MIDELEG_AIA_MASK : 0;
+  const reg_t delegable_ints = supervisor_ints | coprocessor_ints | lscof_int | aia_ints;
 
   return basic_csr_t::unlogged_write(val & delegable_ints);
 }
@@ -942,7 +1018,7 @@ bool medeleg_csr_t::unlogged_write(const reg_t val) noexcept {
     | (1 << CAUSE_BREAKPOINT)
     | (1 << CAUSE_MISALIGNED_LOAD)
     | (1 << CAUSE_LOAD_ACCESS)
-    | (1 << CAUSE_MISALIGNED_STORE) 
+    | (1 << CAUSE_MISALIGNED_STORE)
     | (1 << CAUSE_STORE_ACCESS)
     | (1 << CAUSE_USER_ECALL)
     | (1 << CAUSE_SUPERVISOR_ECALL)
@@ -1225,7 +1301,8 @@ void hypervisor_csr_t::verify_permissions(insn_t insn, bool write) const {
 }
 
 hideleg_csr_t::hideleg_csr_t(processor_t* const proc, const reg_t addr, csr_t_p mideleg):
-  masked_csr_t(proc, addr, MIP_VS_MASK, 0),
+  // AIA adds interrupts above [12:0]
+  masked_csr_t(proc, addr, MIP_VS_MASK | (proc->extension_enabled_const(EXT_SSAIA) ? MIDELEG_AIA_MASK : 0), 0),
   mideleg(mideleg) {
 }
 
@@ -1663,6 +1740,10 @@ void stimecmp_csr_t::verify_permissions(insn_t insn, bool write) const {
     throw trap_virtual_instruction(insn.bits());
   }
 
+  // trap if AIA, hvictl.VTI, on write when v=1
+  if (proc->extension_enabled_const(EXT_SSAIA) && state->v && write && get_field(state->hvictl->read(), HVICTL_VTI))
+    throw trap_virtual_instruction(insn.bits());
+
   basic_csr_t::verify_permissions(insn, write);
 }
 
@@ -1939,16 +2020,29 @@ bool hstatus_csr_t::unlogged_write(const reg_t val) noexcept {
   const reg_t mask = HSTATUS_VTSR | HSTATUS_VTW
     | (proc->supports_impl(IMPL_MMU) ? HSTATUS_VTVM : 0)
     | (proc->extension_enabled(EXT_SSNPM) ? HSTATUS_HUPMM : 0)
-    | HSTATUS_HU | HSTATUS_SPVP | HSTATUS_SPV | HSTATUS_GVA;
+    | HSTATUS_HU | HSTATUS_SPVP | HSTATUS_SPV | HSTATUS_GVA | HSTATUS_VGEIN;
 
   const reg_t pmm_reserved = 1; // Reserved value of mseccfg.PMM
   reg_t pmm = get_field(val, HSTATUS_HUPMM);
   const reg_t adjusted_val = set_field(val, HSTATUS_HUPMM, pmm != pmm_reserved ? pmm : 0);
 
-  const reg_t new_hstatus = (read() & ~mask) | (adjusted_val & mask);
+  reg_t new_hstatus = (read() & ~mask) | (adjusted_val & mask);
   if (get_field(new_hstatus, HSTATUS_HUPMM) != get_field(read(), HSTATUS_HUPMM))
     proc->get_mmu()->flush_tlb();
-  return basic_csr_t::unlogged_write(new_hstatus);
+
+  reg_t old_vgein = get_field(read(), HSTATUS_VGEIN);
+  reg_t new_vgein = get_field((reg_t)val, HSTATUS_VGEIN);
+  // VGEIN is WLRL
+  if (proc->extension_enabled_const(EXT_SSAIA) && new_vgein && !proc->imsic->vgein_valid(new_vgein))
+    new_hstatus = set_field(new_hstatus, HSTATUS_VGEIN, old_vgein);
+  // update_mip() needs the new VGEIN, so hstatus must be updated first
+  bool ret =  basic_csr_t::unlogged_write(new_hstatus);
+  // if vgein = 0, hypervisor controls VSEIP, otherwise IMSIC sets it
+  if (proc->extension_enabled_const(EXT_SSAIA) && new_vgein && new_vgein != old_vgein &&
+      proc->imsic->vgein_valid(new_vgein)) {
+    proc->imsic->vs[new_vgein]->update_mip();
+  }
+  return ret;
 }
 
 scntinhibit_csr_t::scntinhibit_csr_t(processor_t* const proc, const reg_t addr, csr_t_p mcountinhibit):

@@ -23,6 +23,8 @@ riscv_install_hdrs = \
 	common.h \
 	csrs.h \
 	debug_defines.h \
+        aia_csrs.h \
+        imsic.h \
 	debug_module.h \
 	debug_rom_defines.h \
 	decode.h \
@@ -73,6 +75,8 @@ riscv_srcs = \
 	vector_unit.cc \
 	socketif.cc \
 	cfg.cc \
+	aia_csrs.cc \
+	imsic.cc \
 	$(riscv_gen_srcs) \
 
 riscv_test_srcs = \

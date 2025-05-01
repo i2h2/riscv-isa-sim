@@ -13,10 +13,12 @@
 #include "debug_rom_defines.h"
 #include "entropy_source.h"
 #include "csrs.h"
+#include "aia_csrs.h"
 #include "isa_parser.h"
 #include "triggers.h"
 #include "../fesvr/memif.h"
 #include "vector_unit.h"
+#include "imsic.h"
 
 #define FIRST_HPMCOUNTER 3
 #define N_HPMCOUNTERS 29
@@ -117,6 +119,8 @@ struct state_t
   csr_t_p nonvirtual_sepc;
   csr_t_p nonvirtual_stval;
   sstatus_proxy_csr_t_p nonvirtual_sstatus;
+  csr_t_p sie;
+  csr_t_p sip;
 
   csr_t_p mtval2;
   csr_t_p mtinst;
@@ -127,7 +131,11 @@ struct state_t
   csr_t_p htval;
   csr_t_p htinst;
   csr_t_p hgatp;
-  hvip_csr_t_p hvip;
+  csr_t_p hvip;
+  csr_t_p hip;
+  csr_t_p hie;
+  csr_t_p hgeie;
+  csr_t_p hgeip;
   sstatus_csr_t_p sstatus;
   vsstatus_csr_t_p vsstatus;
   csr_t_p vstvec;
@@ -173,6 +181,33 @@ struct state_t
 
   csr_t_p ssp;
 
+  // AIA
+  csr_t_p miselect;
+  aia_ireg_proxy_csr_t_p aia_mireg;
+  csr_t_p mtopei;
+  csr_t_p mtopi;
+  csr_t_p mvien;
+  csr_t_p mvip;
+
+  csr_t_p siselect;
+  aia_ireg_proxy_csr_t_p aia_sireg;
+  csr_t_p stopei;
+  csr_t_p stopi;
+
+  csr_t_p hvien;
+  csr_t_p hvictl;
+  csr_t_p hviprio1;
+  csr_t_p hviprio2;
+  csr_t_p vsiselect;
+  aia_ireg_proxy_csr_t_p aia_vsireg;
+  csr_t_p vstopei;
+  csr_t_p vstopi;
+
+  // Smcsrind / Sscsrind
+  sscsrind_reg_csr_t::sscsrind_reg_csr_t_p mireg[6];
+  sscsrind_reg_csr_t::sscsrind_reg_csr_t_p sireg[6];
+  sscsrind_reg_csr_t::sscsrind_reg_csr_t_p vsireg[6];
+  
   bool serialized; // whether timer CSRs are in a well-defined state
 
   // When true, execute a single instruction and then enter debug mode.  This
@@ -246,7 +281,7 @@ public:
   processor_t(const char* isa_str, const char* priv_str,
               const cfg_t* cfg,
               simif_t* sim, uint32_t id, bool halt_on_reset,
-              FILE *log_file, std::ostream& sout_); // because of command line option --log and -s we need both
+              unsigned geilen, FILE *log_file, std::ostream& sout_); // because of command line option --log and -s we need both
   ~processor_t();
 
   const isa_parser_t &get_isa() { return isa; }
@@ -402,7 +437,22 @@ private:
   static const size_t OPCODE_CACHE_SIZE = 4095;
   opcode_cache_entry_t opcode_cache[OPCODE_CACHE_SIZE];
 
-  void take_pending_interrupt() { take_interrupt(state.mip->read() & state.mie->read()); }
+  reg_t pending_interrupts() {
+    const bool ssaia = extension_enabled_const(EXT_SSAIA);
+    // read virtualized sip & sie (which reads HS or VS copies) to get virtual interrupts [63:13] from mvip or hvip.
+    return (state.mip->read() & state.mie->read()) |
+      (ssaia ? MIDELEG_AIA_MASK & state.sip->read() & state.sie->read() : 0);
+  }
+  reg_t pending_vti() {
+    // pending virtual trap interrupt if V = 1, hvictl.VTI = 1 and hvictl.IID != 9
+    if (!extension_enabled_const(EXT_SSAIA))
+      return 0;
+    reg_t hvictl = state.hvictl->read();
+    reg_t iid = get_field(hvictl, HVICTL_IID);
+    return (state.v && get_field(hvictl, HVICTL_VTI) && iid != IRQ_S_EXT) ? reg_t(1) << iid : 0;
+  }
+
+  void take_pending_interrupt() { take_interrupt(pending_interrupts()); }
   void take_interrupt(reg_t mask); // take first enabled interrupt in mask
   void take_trap(trap_t& t, reg_t epc); // take an exception
   void take_trigger_action(triggers::action_t action, reg_t breakpoint_tval, reg_t epc, bool virt);
@@ -435,6 +485,9 @@ public:
 
   vectorUnit_t VU;
   triggers::module_t TM;
+
+  unsigned geilen;
+  imsic_t_p imsic;
 };
 
 #endif
