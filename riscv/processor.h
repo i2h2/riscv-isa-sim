@@ -17,6 +17,7 @@
 #include "triggers.h"
 #include "../fesvr/memif.h"
 #include "vector_unit.h"
+#include "imsic.h"
 
 #define FIRST_HPMCOUNTER 3
 #define N_HPMCOUNTERS 29
@@ -450,6 +451,7 @@ public:
   triggers::module_t TM;
 
   unsigned geilen;
+  imsic_t_p imsic;
 };
 
 #endif
