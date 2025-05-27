@@ -593,6 +593,7 @@ void processor_t::disasm(insn_t insn)
     unsigned max_xlen = isa.get_max_xlen();
 
     s << "core " << std::dec << std::setfill(' ') << std::setw(3) << id
+      << " (v=" << state.v << " prv=" << state.prv << ")"
       << std::hex << ": 0x" << std::setfill('0') << std::setw(max_xlen / 4)
       << zext(state.pc, max_xlen) << " (0x" << std::setw(8) << bits << ") "
       << disassembler->disassemble(insn) << std::endl;
